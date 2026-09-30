@@ -330,6 +330,9 @@ def test_raw_tokens_hybrid_roundtrip(memory_store, recurrent_type, wrapped):
                         with attention_transfer_window():
                             assert layer in pool._attention_saved_layers
                     worker.save_kv_layer(name, caches[name], None)
+                # Deferred drain: synchronize so the queue-empty assertion
+                # below observes the committed final-layer save.
+                pool._drain_deferred_last_save()
                 assert pool.kv_send_thread.request_queue.unfinished_tasks == 0
             sending, recving = worker.get_finished(output.finished_req_ids)
             result = create_model_runner_output([request] if scheduled else [])

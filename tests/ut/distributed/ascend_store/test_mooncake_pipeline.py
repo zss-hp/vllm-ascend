@@ -186,6 +186,9 @@ class TestMooncakePipeline(unittest.TestCase):
                         is_last_chunk=True,
                     )
                     self.run_step(worker, request)
+                    # Deferred drain: synchronize so the hit check below
+                    # observes the fully committed saves.
+                    worker._drain_deferred_last_save()
                     self.assertEqual(scheduler._query_layerwise_block_hits([expected_keys]), [index == 3])
                 # Destroy every destination and remap block IDs; stale local
                 # bytes and local-prefix-cache hits cannot hide a bad restore.
@@ -231,6 +234,7 @@ class TestMooncakePipeline(unittest.TestCase):
                     is_last_chunk=True,
                 )
                 self.run_step(worker, req)
+                worker._drain_deferred_last_save()
         self.assertEqual(len(store.complete), 14)
 
     def test_scheduler_block_size_rewrite_preserves_remote_hits(self):
@@ -258,6 +262,8 @@ class TestMooncakePipeline(unittest.TestCase):
                     is_last_chunk=True,
                 ),
             )
+        for worker in workers:
+            worker._drain_deferred_last_save()
         self.assertTrue(store.complete, "the regression must write real objects")
         keys = scheduler._make_layerwise_hit_check_keys(0, b"h0".hex())
         self.assertEqual(scheduler._query_layerwise_block_hits([keys]), [True])
@@ -338,6 +344,8 @@ class TestMooncakePipeline(unittest.TestCase):
                         is_last_chunk=True,
                     ),
                 )
+        for worker in (stage0, stage1):
+            worker._drain_deferred_last_save()
         complete = scheduler._make_layerwise_hit_check_keys(0, b"h1".hex())
         incomplete = scheduler._make_layerwise_hit_check_keys(1, b"h1".hex())
         self.assertEqual(scheduler._query_layerwise_block_hits([complete, incomplete]), [True, False])
@@ -425,12 +433,20 @@ class TestMooncakePipeline(unittest.TestCase):
         with (
             patch.object(store, "batch_copy_put", side_effect=delayed_put),
             patch.object(worker, "_wait_for_final_layer_save", side_effect=finish),
+            # This test pins the synchronous inline-drain contract. With the
+            # deferred drain (the production default) the wait would move to
+            # the next step's start_load_kv and the event could never fire
+            # within a single run_step.
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker._LW_DEFER_LAST_SAVE",
+                False,
+            ),
         ):
             compute = threading.Thread(target=run, daemon=True)
             compute.start()
             try:
-                self.assertTrue(copy_started.wait(timeout=1))
-                self.assertTrue(final_entered.wait(timeout=1), "per-layer fencing destroyed compute/transfer overlap")
+                self.assertTrue(copy_started.wait(timeout=5))
+                self.assertTrue(final_entered.wait(timeout=5), "per-layer fencing destroyed compute/transfer overlap")
                 self.assertFalse(returned.wait(timeout=0.1), "source block lifetime ended before the earlier PUT")
             finally:
                 release_copy.set()

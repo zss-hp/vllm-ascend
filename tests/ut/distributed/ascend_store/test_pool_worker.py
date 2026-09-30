@@ -313,6 +313,13 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
             thread.join(timeout=2)
         self.assertFalse(thread.is_alive())
 
+    # This test pins the synchronous inline-drain contract (the save call
+    # itself blocks until the earlier queued PUT completes). The production
+    # default is the deferred drain; patch it off for this contract check.
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker._LW_DEFER_LAST_SAVE",
+        False,
+    )
     def test_empty_final_layer_still_waits_for_earlier_put(self):
         worker = self.make_worker()
         worker.current_layer = worker.num_layers - 1
@@ -1682,6 +1689,10 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                 worker.kv_recv_thread.add_request.call_count,
                 (step + 1) * worker.num_layers if has_load else 0,
             )
+            # The deferred last-layer drain runs at the next step's
+            # start_load_kv; synchronize so the stale-event check below
+            # observes the cleared completion events.
+            worker._drain_deferred_last_save()
             self.assertTrue(all(not event.is_set() for event in worker.layer_save_finished_events))
             worker._attention_saved_layers.add(0)
 

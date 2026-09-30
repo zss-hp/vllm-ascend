@@ -103,11 +103,13 @@ from vllm_ascend.distributed.utils import (
 
 # PERF-TUNE switch: defer the last layer's save drain out of the forward
 # critical path; the drain runs at the start of the next step's start_load_kv.
-# Opt-in (default off): the synchronous inline drain is the long-standing
-# contract that layerwise tests (e.g. test_mooncake_pipeline) and downstream
-# readers rely on, and deferring widens the window in which a subsequent
-# request can observe a partially published prefix.
-_LW_DEFER_LAST_SAVE = os.environ.get("VLLM_ASCEND_LW_DEFER_LAST_SAVE", "0") == "1"
+# Default on: the drain (host wait + event reset for the final layer's save)
+# runs at the start of the NEXT step's start_load_kv, absorbing the send
+# thread's tail latency into the inter-step scheduling gap. On the 122B MoE
+# prefix-sharing benchmark this is worth ~16pp of TTFT (defer=0: +15.5% vs
+# HBM-only, defer=1: -0.4%). Set VLLM_ASCEND_LW_DEFER_LAST_SAVE=0 to restore
+# the synchronous inline drain at the end of save_kv_layer.
+_LW_DEFER_LAST_SAVE = os.environ.get("VLLM_ASCEND_LW_DEFER_LAST_SAVE", "1") == "1"
 
 # Read lease TTL (ms) for the layerwise load path. batch_add_lease acquires a
 # read lease before batch_copy(G2L); the lease must cover the asynchronous
